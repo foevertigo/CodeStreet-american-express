@@ -28,6 +28,8 @@ structlog==24.1.0        # Structured JSON logging
 
 # Testing
 pytest==8.2.0
+sarvamai
+python-multipart==0.0.9
 pytest-asyncio==0.23.6
 pytest-mock==3.14.0
 

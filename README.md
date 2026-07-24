@@ -1,187 +1,79 @@
-# AmEx AI Agent — Async Audit Pipeline & Databases
+# AmEx End-to-End AI Servicing Agent Architecture
 
-**Component owner:** Audit Pipeline Team  
-**Stack:** Apache Kafka · Logstash · Elasticsearch · Redis · PostgreSQL · Python
+## Overview
+This repository contains an enterprise-grade, autonomous customer servicing pipeline built for high-frequency financial operations (Fee Waivers, Credit Limit Increases, Card Replacements). The architecture strictly enforces regulatory compliance, eliminates Large Language Model (LLM) financial hallucinations, and maintains an immutable cryptographic audit trail.
 
-This repository contains the **data infrastructure layer** of the FinTech AI Servicing Agent:
-1. **Redis** — LangGraph conversation state store (session memory)
-2. **PostgreSQL** — Customer profiles, transactions, compliance history
-3. **Async Audit Pipeline** — Kafka → Logstash → Elasticsearch (WORM immutable audit trail)
+## Core Architecture Stack
+- **Frontend**: Next.js 16 (Turbopack), React, Web Audio API, WebAssembly (WASM) multithreading.
+- **Backend**: FastAPI, Python 3.10+, Uvicorn.
+- **Orchestration**: LangGraph, Llama 3.3 70B (Groq).
+- **Speech-to-Text / Text-to-Speech**: Sarvam AI (saaras:v3 / bulbul:v3) with real-time ONNX Runtime WebAssembly processing (Silero VAD).
+- **Vector Database (RAG)**: ChromaDB (Local HNSW cosine space) with Groq-compatible embeddings.
+- **Relational Database**: PostgreSQL (Customer profiles, transaction history).
+- **Event Bus / Audit Trail**: Apache Kafka (WORM compliant event sourcing).
+- **State Management**: Redis (Session persistence, distributed locks).
 
----
+## Key Technical Innovations
 
-## Architecture Overview
+1. **Multilingual Real-Time Voice Gateway**
+   Utilizes a local ONNX-based Voice Activity Detection (VAD) model executing via WebWorkers and AudioWorklets in the browser to stream continuous audio. The pipeline detects the spoken language (e.g., Hindi, Tamil, English) via Sarvam AI, propagates the language code dynamically through the LangGraph system prompt, and synthesizes the final native-language audio response with strict JSON-tooling language guards to prevent schema corruption.
 
-```
-                    ┌──────────────────────────────────────────────┐
-                    │  Other microservices                          │
-                    │  (LangGraph, Policy Engine, Auth, Banking)   │
-                    └─────────────────┬────────────────────────────┘
-                                      │  from audit_service import ...
-                    ┌─────────────────▼────────────────────────────┐
-                    │          audit_service/ (Python Package)      │
-                    │   kafka_producer · redis_client · pg_client  │
-                    └──────┬─────────────┬──────────────┬──────────┘
-                           │             │              │
-              ┌────────────▼──┐   ┌──────▼─────┐  ┌───▼──────────┐
-              │  Apache Kafka │   │   Redis    │  │  PostgreSQL  │
-              │  (Event Bus)  │   │  (State)   │  │  (Customers) │
-              └──────┬────────┘   └────────────┘  └──────────────┘
-                     │
-              ┌──────▼────────┐
-              │   Logstash    │
-              │ (ETL bridge)  │
-              └──────┬────────┘
-                     │
-              ┌──────▼────────┐     ┌────────────────┐
-              │ Elasticsearch │────►│ Kibana (UI)    │
-              │ (Audit Trail) │     │ :5601          │
-              └───────────────┘     └────────────────┘
-```
+2. **Retrieval-Augmented Generation (RAG) for Compliance**
+   Prior to state graph execution, the backend semantically queries a localized ChromaDB instance to retrieve authoritative compliance policy documents. These rules are injected directly into the LLM context window. The LLM is strictly prompted to govern its decisions based solely on the retrieved rule set.
 
----
+3. **Deterministic Tool Execution (Zero-Hallucination)**
+   The LLM is constrained to intent classification, parameter extraction, and conversational synthesis. All financial calculations, eligibility checks, and database commits are executed by deterministic Python functions.
 
-## Quick Start
+4. **Immutable Kafka Audit Pipeline**
+   Every action in the system generates a discrete event pushed to Kafka topics (`agent-actions`, `compliance-decisions`, `system-errors`). This includes `COMPLIANCE_RAG_RETRIEVAL` events, which log the exact vector chunks the AI reviewed prior to making a decision, satisfying stringent regulatory provenance requirements.
 
-### 1. Prerequisites
-- **Docker Desktop** installed and running
-- **Python 3.11+**
+5. **Human-in-the-Loop Supervisor Dashboard**
+   Real-time WebSocket streaming routes high-frustration users or unauthorized requests to a dedicated Next.js `/supervisor` dashboard, providing human agents with full conversation context and semantic intent analysis for seamless takeover.
 
-### 2. Start Infrastructure
+## Local Development & Setup Instructions
+
+To execute the full pipeline locally, the underlying infrastructure must be initialized before starting the application servers.
+
+### 1. Initialize Infrastructure Services
+The project utilizes Docker Compose to orchestrate PostgreSQL, Redis, Kafka, Zookeeper, Elasticsearch, and Logstash.
+
 ```bash
-# Clone / navigate to project
-cd "C:\Projects\american express"
-
-# Copy environment file
-copy .env.example .env
-
-# Start all 8 Docker services
+# Start all infrastructure containers in detached mode
 docker compose up -d
-
-# Verify all services are up (wait ~60 seconds first)
-docker compose ps
 ```
 
-### 3. Install Python Dependencies
-```bash
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-pip install -r requirements.txt
-```
+### 2. Seed Databases
+Once the containers are healthy, initialize the PostgreSQL schemas and seed the mock customer profiles and compliance rules.
 
-### 4. Seed the Database
 ```bash
+# Execute the database seed script
 python scripts/seed_db.py
 ```
 
-### 5. Verify the Pipeline Works
+### 3. Start the Application Servers
+The backend and frontend must run concurrently.
+
+**Terminal 1 (Backend):**
 ```bash
-python scripts/verify_pipeline.py
+# Install dependencies if not already present
+pip install -r requirements.txt
+
+# Start the FastAPI server
+python -m uvicorn ai_backend.main:app --reload --port 8000
 ```
 
-Expected output:
-```
-✅ Redis: Write/Read/Delete OK
-✅ PostgreSQL: Schema OK, found customer: James Wilson
-✅ Elasticsearch: Cluster status: yellow
-✅ Kafka: Published 6 test events
-⏳ Waiting 20s for Logstash to process...
-✅ Elasticsearch ingestion: All 6/6 events found in indices
-✅ PIPELINE IS FULLY OPERATIONAL
-```
-
-### 6. Open Kibana Dashboard
-Visit [http://localhost:5601](http://localhost:5601) → Discover → Index pattern: `amex-audit-*`
-
----
-
-## Project Structure
-
-```
-american express/
-├── docker-compose.yml          # All 8 infrastructure services
-├── .env                        # Environment variables (not in git)
-├── .env.example                # Template for developers
-├── requirements.txt            # Python dependencies
-│
-├── audit_service/              # Python package (other services import this)
-│   ├── config.py               # Pydantic settings from .env
-│   ├── event_schemas.py        # Pydantic models for all Kafka events
-│   ├── kafka_producer.py       # publish_event() function
-│   ├── redis_client.py         # RedisSessionClient class
-│   └── postgres_client.py      # PostgresClient class
-│
-├── db/
-│   ├── postgres/init.sql       # Full schema (auto-runs on first Docker start)
-│   └── redis/redis.conf        # Redis config (password, memory, persistence)
-│
-├── pipeline/
-│   └── logstash/
-│       ├── logstash.conf       # Kafka input → Elasticsearch output pipeline
-│       └── pipelines.yml       # Logstash pipeline registration
-│
-├── scripts/
-│   ├── seed_db.py              # Insert demo customers & history
-│   └── verify_pipeline.py      # End-to-end health check
-│
-├── tests/
-│   ├── test_kafka_producer.py  # Unit tests (no Docker needed)
-│   ├── test_redis_client.py
-│   └── test_postgres_client.py
-│
-└── docs/
-    └── INTEGRATION_GUIDE.md    # How other teams use this package
-```
-
----
-
-## Running Tests
-
-Unit tests run without Docker (fully mocked):
-
+**Terminal 2 (Frontend):**
 ```bash
-pytest tests/ -v
+cd frontend
+
+# Install Next.js dependencies
+npm install
+
+# Start the development server
+npm run dev
 ```
 
----
-
-## Kafka Topics
-
-| Topic | Published By | Consumed By |
-|---|---|---|
-| `agent-actions` | LangGraph Orchestrator | Logstash → Elasticsearch |
-| `compliance-decisions` | Policy Engine | Logstash → Elasticsearch |
-| `card-events` | LangGraph Orchestrator | Logstash → Elasticsearch |
-| `system-errors` | All services | Logstash → Elasticsearch + Alerting |
-| `escalations` | LangGraph Orchestrator | Logstash → Elasticsearch + Human Dashboard |
-
----
-
-## Demo Customers (Postgres)
-
-| Name | Credit Score | Scenario |
-|---|---|---|
-| James Wilson | 750 | Fee waiver INELIGIBLE (used 3 months ago) |
-| Sarah Chen | 620 | Fee waiver eligible, CLI ineligible |
-| Marcus Johnson | 810 | Eligible for everything |
-| Emily Rodriguez | 580 | New account (Feb 2024) |
-| David Kim | 490 | Suspended account |
-
----
-
-## Stopping Services
-
-```bash
-docker compose down          # Stop (keep data)
-docker compose down -v       # Stop + delete all data (CAUTION)
-```
-
----
-
-## For Developers
-
-See [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md) for:
-- Copy-paste code for every event type
-- Redis session state schema
-- PostgreSQL query examples
-- Troubleshooting guide
+### 4. Customizing Policies
+To modify the compliance rules or customer profiles for distinct testing scenarios:
+- **Compliance Rules**: Edit the constants defined in `ai_backend/rag/policy_documents.py`.
+- **User Profiles**: Modify the initial injection dictionaries within `scripts/seed_db.py`.

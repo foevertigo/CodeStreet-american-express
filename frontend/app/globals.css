@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    background-color: #f4f4f0; /* Off-white / cream background */
+    color: #1a1a1a;
+    font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  }
+}
+
+h1, h2, h3, h4, h5, h6, .font-serif {
+  font-family: "Playfair Display", "Georgia", serif;
+  letter-spacing: -0.02em;
+}
+
+/* Blob Animation */
+.blob {
+  background-color: #1a1a1a;
+  border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
+  transition: all 0.5s ease;
+  animation: morph 8s ease-in-out infinite alternate;
+}
+
+.blob-active {
+  background-color: #2563eb;
+  box-shadow: 0 0 40px rgba(37, 99, 235, 0.4);
+  animation: morph-fast 2s ease-in-out infinite alternate;
+}
+
+.blob-speaking {
+  background-color: #059669; /* emerald for AI speaking */
+  box-shadow: 0 0 50px rgba(5, 150, 105, 0.5);
+  animation: morph-fast 1s ease-in-out infinite alternate, pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes morph {
+  0% {
+    border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
+  }
+  34% {
+    border-radius: 70% 30% 50% 50% / 30% 30% 70% 70%;
+  }
+  67% {
+    border-radius: 100% 60% 60% 100% / 100% 100% 60% 60%;
+  }
+  100% {
+    border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
+  }
+}
+
+@keyframes morph-fast {
+  0% {
+    border-radius: 30% 70% 70% 30% / 30% 30% 70% 70%;
+    transform: scale(1);
+  }
+  50% {
+    border-radius: 50% 50% 40% 60% / 60% 40% 50% 50%;
+    transform: scale(1.05);
+  }
+  100% {
+    border-radius: 70% 30% 30% 70% / 70% 70% 30% 30%;
+    transform: scale(0.95);
+  }
+}
+
+@keyframes pulse {
+  0% { opacity: 0.8; }
+  50% { opacity: 1; }
+  100% { opacity: 0.8; }
+}
+
+/* Custom Scrollbar for minimalist chat */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d1d1d1;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #a1a1a1;
+}
