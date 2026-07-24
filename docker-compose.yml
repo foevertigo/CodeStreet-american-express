@@ -1,0 +1,290 @@
+version: "3.8"
+
+# =============================================================================
+# FinTech AI Agent — Full Infrastructure Stack
+#
+# Services:
+#   1. zookeeper        — Kafka coordination (port 2181)
+#   2. kafka            — Event bus (port 9092)
+#   3. kafka-setup      — One-time topic creation job
+#   4. redis            — Conversation state store (port 6379)
+#   5. postgres         — Customer & transaction database (port 5432)
+#   6. elasticsearch    — Immutable audit trail (port 9200)
+#   7. logstash         — Kafka → Elasticsearch bridge
+#   8. kibana           — Audit dashboard UI (port 5601)
+#
+# Usage:
+#   docker compose up -d          # start everything
+#   docker compose logs -f kafka  # tail a specific service
+#   docker compose down -v        # stop and remove volumes (CAUTION: deletes data)
+# =============================================================================
+
+networks:
+  amex-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  elasticsearch_data:
+  kafka_data:
+  zookeeper_data:
+  zookeeper_logs:
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # 1. ZOOKEEPER — Required by Kafka for coordination
+  # ---------------------------------------------------------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: amex-zookeeper
+    restart: unless-stopped
+    networks:
+      - amex-net
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  # ---------------------------------------------------------------------------
+  # 2. KAFKA — Event Bus (the heart of the async audit pipeline)
+  #
+  # Topics produced by other services:
+  #   agent-actions         — Every tool call the LangGraph agent makes
+  #   compliance-decisions  — Every Policy Engine allow/deny decision
+  #   card-events           — Card replacement events
+  #   system-errors         — Any unhandled exceptions
+  #   escalations           — Human handoff triggers
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: amex-kafka
+    restart: unless-stopped
+    networks:
+      - amex-net
+    ports:
+      - "9092:9092"      # External (for Python clients on the host)
+      - "29092:29092"    # Internal (for Docker-network services like Logstash)
+    depends_on:
+      zookeeper:
+        condition: service_started
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # Two listeners: one for external (host machine), one for internal (Docker network)
+      KAFKA_LISTENERS: PLAINTEXT_EXTERNAL://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_EXTERNAL://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT_EXTERNAL:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"  # Topics created explicitly by kafka-setup
+      KAFKA_LOG_RETENTION_HOURS: 168            # Keep audit logs for 7 days
+      KAFKA_LOG_RETENTION_BYTES: -1             # No size limit
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # 3. KAFKA-SETUP — Creates all required topics on first run
+  # ---------------------------------------------------------------------------
+  kafka-setup:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: amex-kafka-setup
+    networks:
+      - amex-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: |
+      "
+      echo 'Waiting for Kafka to be ready...'
+      kafka-topics --bootstrap-server kafka:29092 --list
+
+      echo 'Creating agent-actions topic...'
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic agent-actions \
+        --partitions 3 \
+        --replication-factor 1 \
+        --config retention.ms=604800000
+
+      echo 'Creating compliance-decisions topic...'
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic compliance-decisions \
+        --partitions 3 \
+        --replication-factor 1 \
+        --config retention.ms=604800000
+
+      echo 'Creating card-events topic...'
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic card-events \
+        --partitions 2 \
+        --replication-factor 1 \
+        --config retention.ms=604800000
+
+      echo 'Creating system-errors topic...'
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic system-errors \
+        --partitions 2 \
+        --replication-factor 1 \
+        --config retention.ms=604800000
+
+      echo 'Creating escalations topic...'
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic escalations \
+        --partitions 1 \
+        --replication-factor 1 \
+        --config retention.ms=604800000
+
+      echo 'Topics created successfully:'
+      kafka-topics --bootstrap-server kafka:29092 --list
+      "
+
+  # ---------------------------------------------------------------------------
+  # 4. REDIS — Conversation State Store (LangGraph session memory)
+  #
+  # Key schema:  session:{session_id}  →  JSON blob (TTL: 30 minutes)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7.2-alpine
+    container_name: amex-redis
+    restart: unless-stopped
+    networks:
+      - amex-net
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./db/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command: redis-server /usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis_secure_pass_2024", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # 5. POSTGRESQL — Customer Profiles & Transaction Data
+  #
+  # Schema: customers, transactions, fee_waiver_history,
+  #         credit_limit_history, card_replacements
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: amex-postgres
+    restart: unless-stopped
+    networks:
+      - amex-net
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      POSTGRES_DB: amex_agent
+      POSTGRES_USER: amex_user
+      POSTGRES_PASSWORD: amex_secure_pass_2024
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amex_user -d amex_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # 6. ELASTICSEARCH — Immutable Audit Trail
+  #
+  # Indices (created by Logstash):
+  #   amex-audit-agent-actions-YYYY.MM.dd
+  #   amex-audit-compliance-decisions-YYYY.MM.dd
+  #   amex-audit-card-events-YYYY.MM.dd
+  #   amex-audit-system-errors-YYYY.MM.dd
+  #   amex-audit-escalations-YYYY.MM.dd
+  # ---------------------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: amex-elasticsearch
+    restart: unless-stopped
+    networks:
+      - amex-net
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false          # Disabled for demo simplicity
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m       # Memory limits for demo machine
+      - ELASTICSEARCH_SKIP_KERNEL_PARAMS=true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # 7. LOGSTASH — Kafka → Elasticsearch bridge
+  #
+  # Consumes all 5 Kafka topics and indexes into date-partitioned ES indices.
+  # ---------------------------------------------------------------------------
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.13.0
+    container_name: amex-logstash
+    restart: unless-stopped
+    networks:
+      - amex-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./pipeline/logstash/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+      - ./pipeline/logstash/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
+    environment:
+      LS_JAVA_OPTS: "-Xms256m -Xmx256m"
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      KAFKA_BROKERS: kafka:29092       # Uses internal Docker listener
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9600 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # 8. KIBANA — Audit Dashboard UI
+  #
+  # Access at: http://localhost:5601
+  # Use to query audit logs, build dashboards for compliance officers.
+  # ---------------------------------------------------------------------------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.0
+    container_name: amex-kibana
+    restart: unless-stopped
+    networks:
+      - amex-net
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      XPACK_SECURITY_ENABLED: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10

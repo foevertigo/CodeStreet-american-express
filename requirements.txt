@@ -1,0 +1,36 @@
+# Core async
+asyncio-mqtt==0.16.2
+
+# Kafka
+kafka-python==2.0.2
+
+# Redis
+redis==5.0.4
+hiredis==2.3.2          # C-accelerated Redis parser (faster)
+
+# PostgreSQL
+asyncpg==0.29.0         # Async PostgreSQL driver
+psycopg2-binary==2.9.9  # Sync driver (for scripts/seeding)
+sqlalchemy==2.0.30      # ORM (optional, used in postgres_client)
+
+# Elasticsearch
+elasticsearch==8.13.0
+
+# Data validation
+pydantic==2.7.1
+pydantic-settings==2.2.1
+
+# Environment
+python-dotenv==1.0.1
+
+# Logging
+structlog==24.1.0        # Structured JSON logging
+
+# Testing
+pytest==8.2.0
+pytest-asyncio==0.23.6
+pytest-mock==3.14.0
+
+# Utilities
+tenacity==8.3.0          # Retry logic for connections
+requests
