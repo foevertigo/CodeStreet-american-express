@@ -21,3 +21,8 @@ class AgentState(TypedDict):
     escalated: bool
     escalation_reason: Optional[str]
     frustration_score: float
+    # ── NEW: Multilingual + RAG fields ─────────────────────────────────────
+    detected_language: Optional[str]       # e.g. "hi-IN", "ta-IN", "en-IN"
+    rag_context: Optional[str]             # Compliance rules retrieved by vector search
+    transaction_history: Optional[str]     # Last N transactions formatted as text
+

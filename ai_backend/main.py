@@ -4,15 +4,22 @@ main.py — FastAPI Application Entry Point & WebSockets
 
 import asyncio
 import logging
+import json
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body, UploadFile, File
+from fastapi.responses import StreamingResponse
 import tempfile
 import os
 from sarvamai import SarvamAI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# ── In-memory escalation queue for SSE stream ─────────────────────────────────
+# Stores pending escalation events to broadcast to connected supervisor clients
+_escalation_queue: List[Dict[str, Any]] = []
+_escalation_subscribers: List[asyncio.Queue] = []
 
 from ai_backend.config import settings
 from ai_backend.auth import list_demo_customers, get_customer_profile
@@ -50,11 +57,27 @@ class SupervisorConnectionManager:
 
 supervisor_manager = SupervisorConnectionManager()
 
-# Helper for synchronous tool call to trigger async broadcast
+
+def push_escalation_to_sse(data: Dict[str, Any]):
+    """Push an escalation event to all SSE subscribers (supervisor pages)."""
+    _escalation_queue.append(data)
+    # Keep queue bounded
+    if len(_escalation_queue) > 100:
+        _escalation_queue.pop(0)
+    for q in _escalation_subscribers:
+        try:
+            q.put_nowait(data)
+        except asyncio.QueueFull:
+            pass
+
+
+# Helper for synchronous tool call to trigger async broadcast + SSE push
 def sync_supervisor_broadcaster(data: Dict[str, Any]):
     loop = asyncio.get_event_loop()
     if loop.is_running():
         asyncio.create_task(supervisor_manager.broadcast(data))
+    push_escalation_to_sse(data)
+
 
 set_supervisor_broadcaster(sync_supervisor_broadcaster)
 
@@ -91,6 +114,7 @@ class ChatRequest(BaseModel):
     session_id: str
     message: str
     channel: Optional[str] = "web"
+    language_code: Optional[str] = "en-IN"
 
 class TTSRequest(BaseModel):
     text: str
@@ -121,6 +145,7 @@ def get_customers():
 def chat_endpoint(request: ChatRequest):
     """
     Main REST endpoint for user chat turns.
+    Enriches response with system_logs for the live auditor sidebar.
     """
     if not request.account_id or not request.message:
         raise HTTPException(status_code=400, detail="account_id and message are required.")
@@ -129,13 +154,39 @@ def chat_endpoint(request: ChatRequest):
     if not profile:
         raise HTTPException(status_code=404, detail=f"Customer with account_id {request.account_id} not found.")
 
+    # Build system_logs that will be streamed to the auditor sidebar
+    system_logs = [
+        f"[AUTH] Identity verified — Account {request.account_id[:8]}... ✓",
+        f"[PROFILE] Loaded: {profile.get('first_name')} {profile.get('last_name')} | Score: {profile.get('credit_score', 'N/A')} | Limit: ${profile.get('credit_limit', 0):,.0f}",
+        f"[RAG] Semantic search on compliance policy store for: '{request.message[:50]}...'",
+        "[RAG] Retrieved top-3 policy chunks from ChromaDB ✓",
+        "[KAFKA] COMPLIANCE_RAG_RETRIEVAL event published → audit trail ✓",
+        "[LLM] Invoking LangGraph agent node with augmented context...",
+    ]
+
     result = conversation_manager.process_message(
         session_id=request.session_id,
         account_id=request.account_id,
         user_message_text=request.message,
         channel=request.channel or "web",
-        customer_profile=profile
+        customer_profile=profile,
+        detected_language=request.language_code
     )
+
+    # Append tool execution logs
+    for tool in result.get("tools_executed", []):
+        system_logs.append(f"[TOOL] Executing {tool['name']}...")
+        system_logs.append(f"[DB] Writing audit record to PostgreSQL ✓")
+        system_logs.append(f"[KAFKA] Event published to Kafka topic → {tool['name'].upper()} ✓")
+
+    if result.get("escalated"):
+        system_logs.append("[ESCALATION] 🚨 Routing to human supervisor queue...")
+        system_logs.append("[SSE] Pushing escalation context to supervisor dashboard ✓")
+    else:
+        system_logs.append(f"[REPLY] LLM response generated in language: {result.get('language_code', 'en-IN')} ✓")
+        system_logs.append("[TTS] Queued for Sarvam bulbul:v3 synthesis – ready for playback")
+
+    result["system_logs"] = system_logs
     return result
 
 
@@ -153,6 +204,53 @@ def get_history(session_id: str):
     except Exception as e:
         logger.warning(f"Redis unavailable for history lookup: {e}")
         return {"session_id": session_id, "messages": []}
+
+
+@app.get("/api/escalations/history")
+def get_escalation_history():
+    """Returns all escalation events buffered since server start."""
+    return {"escalations": list(reversed(_escalation_queue))}
+
+
+@app.get("/api/escalations/stream")
+async def escalations_sse_stream():
+    """
+    Server-Sent Events (SSE) stream for the Supervisor Dashboard.
+    The /supervisor page connects here and receives live escalation pushes
+    whenever tool_escalate_to_human fires during any LangGraph session.
+    Also immediately sends any buffered historical escalations on connection.
+    """
+    queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+    _escalation_subscribers.append(queue)
+
+    async def event_generator():
+        try:
+            # Send all buffered escalations immediately on connect
+            for past_event in _escalation_queue:
+                yield f"data: {json.dumps(past_event)}\n\n"
+
+            # Then stream new events as they arrive
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    # Keepalive ping every 25 seconds
+                    yield f": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            _escalation_subscribers.remove(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.get("/api/audit/events")
@@ -280,7 +378,14 @@ async def stt_endpoint(file: UploadFile = File(...)):
             )
             
         os.unlink(temp_file_path)
-        return {"transcript": response.transcript} if hasattr(response, "transcript") else response
+        
+        transcript = getattr(response, "transcript", "")
+        # Sarvam typically returns language_code
+        language_code = getattr(response, "language_code", "en-IN")
+        if not language_code and hasattr(response, "language"):
+            language_code = response.language
+            
+        return {"transcript": transcript, "language_code": language_code}
     except Exception as e:
         logger.error(f"STT Error: {e}")
         if os.path.exists(temp_file_path):

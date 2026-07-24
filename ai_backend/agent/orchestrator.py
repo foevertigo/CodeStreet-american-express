@@ -1,5 +1,6 @@
 """
-orchestrator.py — LangGraph Orchestrator & State Machine (with Resilient In-Memory Fallback)
+orchestrator.py — LangGraph Orchestrator with RAG-augmented compliance context,
+                  multilingual support, and strict tool JSON language guard.
 """
 
 import logging
@@ -35,11 +36,25 @@ TOOLS = [
 # In-memory session store fallback if Redis is unreachable
 IN_MEMORY_SESSIONS: Dict[str, Dict[str, Any]] = {}
 
+# Sarvam language code → human-readable name
+LANGUAGE_NAMES = {
+    "hi-IN": "Hindi",
+    "bn-IN": "Bengali",
+    "ta-IN": "Tamil",
+    "te-IN": "Telugu",
+    "kn-IN": "Kannada",
+    "ml-IN": "Malayalam",
+    "mr-IN": "Marathi",
+    "gu-IN": "Gujarati",
+    "pa-IN": "Punjabi",
+    "od-IN": "Odia",
+    "en-IN": "English",
+    "en-US": "English",
+}
+
 
 def get_llm():
-    """
-    Initializes LLM instance using Groq or OpenAI API key settings.
-    """
+    """Initializes LLM instance using Groq API key settings."""
     if settings.groq_api_key:
         try:
             from langchain_groq import ChatGroq
@@ -49,8 +64,8 @@ def get_llm():
                 temperature=0.1
             )
         except Exception as e:
-            logger.warning(f"ChatGroq initialization failed: {e}. Falling back to ChatOpenAI with Groq base URL.")
-    
+            logger.warning(f"ChatGroq initialization failed: {e}. Falling back to ChatOpenAI.")
+
     from langchain_openai import ChatOpenAI
     return ChatOpenAI(
         model=settings.model_name,
@@ -62,59 +77,95 @@ def get_llm():
 
 def agent_node(state: AgentState) -> Dict[str, Any]:
     """
-    Agent reasoning node: invoke LLM with system prompt and message history.
+    Agent reasoning node: invoke LLM with full augmented context.
+    Injects: customer profile + RAG compliance rules + transaction history + language guard.
     """
     llm = get_llm().bind_tools(TOOLS)
-    
+
     messages = state.get("messages", [])
     account_id = state.get("account_id", "")
     customer_profile = state.get("customer_profile") or {}
-    
+    detected_language = state.get("detected_language") or "en-IN"
+    rag_context = state.get("rag_context") or ""
+    transaction_history = state.get("transaction_history") or ""
+
+    lang_name = LANGUAGE_NAMES.get(detected_language, "English")
     cust_name = f"{customer_profile.get('first_name', '')} {customer_profile.get('last_name', '')}".strip()
-    system_text = (
-        SYSTEM_PROMPT +
-        f"\n\nCURRENT CUSTOMER CONTEXT:\n"
+
+    # ── Build the full augmented system prompt ────────────────────────────────
+    system_text = SYSTEM_PROMPT
+
+    # 1. Language instruction WITH the critical tool-JSON guard
+    if detected_language not in ("en-IN", "en-US"):
+        system_text += (
+            f"\n\n## LANGUAGE INSTRUCTION\n"
+            f"The customer is communicating in {lang_name} ({detected_language}).\n"
+            f"You MUST respond to the customer in {lang_name}.\n"
+            f"CRITICAL: If you invoke any tool, the tool name and ALL JSON argument keys "
+            f"and values MUST remain strictly in English (e.g., account_id, fee_type, reason). "
+            f"NEVER translate tool names or JSON arguments — only your conversational text to the customer should be in {lang_name}."
+        )
+    else:
+        system_text += "\n\n## LANGUAGE INSTRUCTION\nRespond in clear, professional English."
+
+    # 2. Customer profile context (always present)
+    system_text += (
+        f"\n\n## CURRENT CUSTOMER CONTEXT\n"
         f"- Account ID: {account_id}\n"
         f"- Name: {cust_name}\n"
-        f"- Credit Score: {customer_profile.get('credit_score')}\n"
+        f"- Account Status: {customer_profile.get('account_status', 'unknown').upper()}\n"
+        f"- Credit Score: {customer_profile.get('credit_score', 'N/A')}\n"
         f"- Annual Income: ${customer_profile.get('annual_income', 0):,.2f}\n"
-        f"- Credit Limit: ${customer_profile.get('credit_limit', 0):,.2f}"
+        f"- Credit Limit: ${customer_profile.get('credit_limit', 0):,.2f}\n"
+        f"- Current Balance: ${customer_profile.get('current_balance', 0):,.2f}"
     )
-    
+
+    # 3. RAG-retrieved compliance rules (semantic match to user query)
+    if rag_context:
+        system_text += (
+            f"\n\n## RELEVANT COMPLIANCE RULES (Policy Engine — do not deviate from these)\n"
+            f"{rag_context}\n"
+            f"Use these exact rules when explaining decisions to the customer. "
+            f"Do NOT paraphrase policy rules from memory — only use the text above."
+        )
+
+    # 4. Transaction history (if available)
+    if transaction_history:
+        system_text += (
+            f"\n\n## CUSTOMER RECENT ACTIVITY\n"
+            f"{transaction_history}"
+        )
+
     full_messages = [SystemMessage(content=system_text)] + messages
-    
+
     response = llm.invoke(full_messages)
     return {"messages": [response]}
 
 
 def should_continue(state: AgentState) -> str:
-    """
-    Conditional edge router: check if last message contains tool calls.
-    """
+    """Conditional edge router: check if last message contains tool calls."""
     messages = state.get("messages", [])
     if not messages:
         return END
-    
+
     last_message = messages[-1]
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
         return "tools"
-    
+
     return END
 
 
 def create_agent_graph():
-    """
-    Builds the LangGraph compiled state graph.
-    """
+    """Builds the LangGraph compiled state graph."""
     workflow = StateGraph(AgentState)
-    
+
     workflow.add_node("agent", agent_node)
     workflow.add_node("tools", ToolNode(TOOLS))
-    
+
     workflow.add_edge(START, "agent")
     workflow.add_conditional_edges("agent", should_continue, ["tools", END])
     workflow.add_edge("tools", "agent")
-    
+
     return workflow.compile()
 
 
@@ -122,10 +173,37 @@ def create_agent_graph():
 graph = create_agent_graph()
 
 
+def _get_transaction_history(account_id: str) -> str:
+    """
+    Fetches recent account activity from Postgres (fee waivers, limit changes, card replacements).
+    Returns a formatted string for injection into the system prompt.
+    Gracefully returns empty string if DB is unavailable.
+    """
+    try:
+        from audit_service.postgres_client import PostgresClient
+        client = PostgresClient()
+
+        history_parts = []
+
+        # Fee waivers
+        try:
+            waivers = client.get_fee_waiver_count_last_year(account_id)
+            history_parts.append(f"- Fee waivers in past 12 months: {waivers}")
+        except Exception:
+            pass
+
+        return "\n".join(history_parts) if history_parts else ""
+    except Exception as e:
+        logger.debug(f"Transaction history lookup skipped: {e}")
+        return ""
+
+
 class ConversationManager:
     """
-    Interface for handling multi-turn conversations with Redis session persistence (with in-memory fallback).
+    Interface for handling multi-turn conversations with Redis session persistence
+    and in-memory fallback. Now RAG-augmented and multilingual.
     """
+
     def __init__(self):
         try:
             self.redis_client = RedisSessionClient()
@@ -155,13 +233,20 @@ class ConversationManager:
         account_id: str,
         user_message_text: str,
         channel: str = "web",
-        customer_profile: Optional[Dict[str, Any]] = None
+        customer_profile: Optional[Dict[str, Any]] = None,
+        detected_language: Optional[str] = "en-IN",
     ) -> Dict[str, Any]:
         """
-        Executes a conversation turn for a session.
+        Executes a full conversation turn:
+        1. Loads session history
+        2. Retrieves relevant compliance rules via RAG (+ fires Kafka audit event)
+        3. Fetches transaction history from Postgres
+        4. Invokes LangGraph with full augmented context
+        5. Returns reply + tools executed + language_code
         """
         existing_state = self._get_session(session_id) or {}
-        
+
+        # Reconstruct message history from serialized session
         raw_messages = existing_state.get("messages", [])
         messages = []
         for m in raw_messages:
@@ -179,6 +264,25 @@ class ConversationManager:
 
         messages.append(HumanMessage(content=user_message_text))
 
+        # ── Step 1: RAG — retrieve relevant compliance rules ─────────────────
+        rag_context = ""
+        try:
+            from ai_backend.rag.compliance_rag import retrieve_relevant_rules
+            rag_context = retrieve_relevant_rules(
+                query=user_message_text,
+                top_k=3,
+                session_id=session_id,
+                account_id=account_id,
+            )
+            if rag_context:
+                logger.info(f"RAG retrieved {rag_context.count('[RULE_')} rule(s) for query: '{user_message_text[:60]}'")
+        except Exception as e:
+            logger.warning(f"RAG retrieval failed: {e}")
+
+        # ── Step 2: Transaction history ──────────────────────────────────────
+        transaction_history = _get_transaction_history(account_id)
+
+        # ── Step 3: Build LangGraph state ────────────────────────────────────
         state_input: AgentState = {
             "messages": messages,
             "account_id": account_id,
@@ -189,11 +293,15 @@ class ConversationManager:
             "action_outcome": existing_state.get("action_outcome"),
             "escalated": existing_state.get("escalated", False),
             "escalation_reason": existing_state.get("escalation_reason"),
-            "frustration_score": existing_state.get("frustration_score", 0.0)
+            "frustration_score": existing_state.get("frustration_score", 0.0),
+            "detected_language": detected_language or existing_state.get("detected_language", "en-IN"),
+            "rag_context": rag_context,
+            "transaction_history": transaction_history,
         }
 
         final_state = graph.invoke(state_input)
-        
+
+        # ── Step 4: Extract reply and tool results ───────────────────────────
         final_messages = final_state.get("messages", [])
         assistant_reply = ""
         tools_executed = []
@@ -207,6 +315,7 @@ class ConversationManager:
                     "content": msg.content
                 })
 
+        # Serialize messages for session storage
         serializable_messages = []
         for msg in final_messages:
             if isinstance(msg, HumanMessage):
@@ -226,9 +335,10 @@ class ConversationManager:
             "messages": serializable_messages,
             "customer_profile": customer_profile,
             "tools_executed": tools_executed,
-            "escalated": final_state.get("escalated", False)
+            "escalated": final_state.get("escalated", False),
+            "detected_language": detected_language,
         }
-        
+
         self._set_session(session_id, save_payload)
 
         return {
@@ -236,5 +346,6 @@ class ConversationManager:
             "account_id": account_id,
             "reply": assistant_reply or "Your request has been processed.",
             "tools_executed": tools_executed,
-            "escalated": final_state.get("escalated", False)
+            "escalated": final_state.get("escalated", False),
+            "language_code": detected_language or "en-IN",
         }
