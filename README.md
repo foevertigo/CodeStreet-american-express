@@ -61,7 +61,7 @@ pip install -r requirements.txt
 # Start the FastAPI server
 python -m uvicorn ai_backend.main:app --reload --port 8000
 ```
-
+docker compose up -d
 **Terminal 2 (Frontend):**
 ```bash
 cd frontend

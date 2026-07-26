@@ -175,9 +175,10 @@ def chat_endpoint(request: ChatRequest):
 
     # Append tool execution logs
     for tool in result.get("tools_executed", []):
-        system_logs.append(f"[TOOL] Executing {tool['name']}...")
+        t_name = str(tool.get("name") or "tool")
+        system_logs.append(f"[TOOL] Executing {t_name}...")
         system_logs.append(f"[DB] Writing audit record to PostgreSQL ✓")
-        system_logs.append(f"[KAFKA] Event published to Kafka topic → {tool['name'].upper()} ✓")
+        system_logs.append(f"[KAFKA] Event published to Kafka topic → {t_name.upper()} ✓")
 
     if result.get("escalated"):
         system_logs.append("[ESCALATION] 🚨 Routing to human supervisor queue...")

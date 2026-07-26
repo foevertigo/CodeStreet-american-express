@@ -138,7 +138,20 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
 
     full_messages = [SystemMessage(content=system_text)] + messages
 
-    response = llm.invoke(full_messages)
+    try:
+        response = llm.invoke(full_messages)
+    except Exception as e:
+        logger.error(f"LLM invocation failed: {e}")
+        err_str = str(e)
+        if "invalid_api_key" in err_str.lower() or "401" in err_str or "authenticationerror" in err_str.lower():
+            response = AIMessage(
+                content="[API Key Error] Groq API Key is invalid or expired (401 Unauthorized). Please update `GROQ_API_KEY` in your `.env` file with a valid key from https://console.groq.com."
+            )
+        else:
+            response = AIMessage(
+                content=f"[Backend Error] LLM Service encountered an error: {err_str}"
+            )
+
     return {"messages": [response]}
 
 
@@ -294,12 +307,21 @@ class ConversationManager:
             "escalated": existing_state.get("escalated", False),
             "escalation_reason": existing_state.get("escalation_reason"),
             "frustration_score": existing_state.get("frustration_score", 0.0),
-            "detected_language": detected_language or existing_state.get("detected_language", "en-IN"),
-            "rag_context": rag_context,
             "transaction_history": transaction_history,
         }
 
-        final_state = graph.invoke(state_input)
+        try:
+            final_state = graph.invoke(state_input)
+        except Exception as e:
+            logger.error(f"LangGraph execution error: {e}", exc_info=True)
+            return {
+                "session_id": session_id,
+                "account_id": account_id,
+                "reply": f"[Service Notice] Request execution failed: {str(e)}",
+                "tools_executed": [],
+                "escalated": False,
+                "language_code": detected_language or "en-IN",
+            }
 
         # ── Step 4: Extract reply and tool results ───────────────────────────
         final_messages = final_state.get("messages", [])

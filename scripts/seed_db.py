@@ -127,6 +127,15 @@ def seed_transactions(client: PostgresClient):
         ("a4444444-0000-0000-0000-000000000004", "purchase", 45.00, "Uber", "transportation", "UBER* TRIP"),
         ("a4444444-0000-0000-0000-000000000004", "purchase", 35.00, "Starbucks", "food", "STARBUCKS #7654"),
         ("a4444444-0000-0000-0000-000000000004", "fee", 35.00, None, None, "Late payment fee - June"),
+
+        # Alex Taylor — 4 months of transactions totaling $3,000.00 (Credit Limit: $1,400)
+        # Month 4 (3 months ago): $850.00 | Month 3 (2 months ago): $650.00
+        # Month 2 (1 month ago): $900.00  | Month 1 (Current month): $600.00
+        # Total = $850 + $650 + $900 + $600 = $3,000.00 (Spend ratio: 214% >= 60%)
+        ("a6666666-0000-0000-0000-000000000006", "purchase", 850.00, "Apple Store", "electronics", "iPad & Accessories (Month 4)"),
+        ("a6666666-0000-0000-0000-000000000006", "purchase", 650.00, "Delta Air Lines", "travel", "Flight SF-NYC (Month 3)"),
+        ("a6666666-0000-0000-0000-000000000006", "purchase", 900.00, "Amazon.com", "shopping", "Home & Office (Month 2)"),
+        ("a6666666-0000-0000-0000-000000000006", "purchase", 600.00, "Target", "groceries", "Monthly Supplies (Month 1)"),
     ]
 
     with get_db_cursor() as cur:
@@ -178,6 +187,27 @@ def seed_agent_sessions(client: PostgresClient):
     logger.info(f"  ✓ {len(sessions)} agent sessions seeded")
 
 
+def seed_alex_taylor_profile(client: PostgresClient):
+    """Seeds Alex Taylor profile if not exists."""
+    logger.info("Seeding Alex Taylor customer profile...")
+    with get_db_cursor() as cur:
+        cur.execute("""
+            INSERT INTO customers (
+                account_id, first_name, last_name, email, phone_number, date_of_birth,
+                ssn_last_four, address_line1, city, state, zip_code,
+                account_status, credit_score, annual_income, credit_limit,
+                current_balance, account_opened_date
+            ) VALUES (
+                'a6666666-0000-0000-0000-000000000006',
+                'Alex', 'Taylor', 'alex.taylor@demo.com', '+12025550006',
+                '1994-06-18', '6789', '100 Financial Plaza', 'San Francisco', 'CA', '94104',
+                'active', 720, 65000.00, 1400.00, 4850.00, NOW() - INTERVAL '4 months'
+            )
+            ON CONFLICT (account_id) DO NOTHING
+        """)
+    logger.info("  ✓ Alex Taylor customer profile seeded")
+
+
 def main():
     logger.info("=" * 60)
     logger.info("AmEx Agent — Database Seeder")
@@ -193,6 +223,7 @@ def main():
 
     logger.info("PostgreSQL connection OK. Starting seed...")
 
+    seed_alex_taylor_profile(client)
     seed_fee_waiver_history(client)
     seed_credit_limit_history(client)
     seed_transactions(client)
@@ -207,6 +238,7 @@ def main():
     logger.info("  Marcus Johnson (a333...) credit_score=810 — ELIGIBLE for everything")
     logger.info("  Emily Rodriguez(a444...) credit_score=580 — NEW ACCOUNT (opened Feb 2024)")
     logger.info("  David Kim      (a555...) credit_score=490 — SUSPENDED account")
+    logger.info("  Alex Taylor    (a666...) credit_score=720 — Limit: $1,400 | 4mo Spend: $3,000 (SPEND-BASED WAIVER ELIGIBLE)")
     logger.info("=" * 60)
 
 

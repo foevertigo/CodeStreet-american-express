@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useMicVAD } from "@ricky0123/vad-react";
-import { Activity, Terminal, ExternalLink } from "lucide-react";
+import { Activity, Terminal, ExternalLink, User, ShieldCheck, Square, RotateCcw } from "lucide-react";
 import Link from "next/link";
 
 interface Message {
@@ -84,6 +84,40 @@ export default function MinimalistVoiceAgent() {
   const [fillerText, setFillerText] = useState("");
   const [fillerIdx, setFillerIdx] = useState(0);
   const [showAudit, setShowAudit] = useState(true);
+  const [selectedAccountId, setSelectedAccountId] = useState("a2222222-0000-0000-0000-000000000002");
+  const [sessionId, setSessionId] = useState(() => "sess-" + Math.random().toString(36).substring(2, 9));
+  const [customers, setCustomers] = useState<any[]>([]);
+
+  useEffect(() => {
+    fetch("http://localhost:8000/api/customers")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.customers && data.customers.length > 0) {
+          setCustomers(data.customers);
+        }
+      })
+      .catch((err) => console.error("Failed to load customer profiles:", err));
+  }, []);
+
+  const resetChat = (newProfileName?: string) => {
+    const newSess = "sess-" + Math.random().toString(36).substring(2, 9);
+    setSessionId(newSess);
+    setMessages([
+      {
+        id: "init-" + Date.now(),
+        sender: "bot",
+        text: newProfileName
+          ? `Switched profile to ${newProfileName}. Started fresh chat session.`
+          : "Chat session ended. Ready for a new conversation.",
+        timestamp: timestamp(),
+      },
+    ]);
+    setIsAiThinking(false);
+    setIsAiSpeaking(false);
+    isProcessingRef.current = false;
+    stopFiller();
+    addAuditLog(`[SYS] Chat session reset. New session initialized (${newSess.slice(0, 10)}) ✓`);
+  };
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const auditEndRef = useRef<HTMLDivElement>(null);
@@ -135,9 +169,6 @@ export default function MinimalistVoiceAgent() {
     },
     positiveSpeechThreshold: 0.6,
     negativeSpeechThreshold: 0.35,
-    minSpeechFrames: 4,
-    preSpeechPadFrames: 10,
-    redemptionFrames: 8,
     onSpeechStart: () => {
 
 
@@ -207,8 +238,8 @@ export default function MinimalistVoiceAgent() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          account_id: "a3333333-0000-0000-0000-000000000003",
-          session_id: "sess-minimal-001",
+          account_id: selectedAccountId,
+          session_id: sessionId,
           message: text,
           channel: "voice",
           language_code: langCode,
@@ -391,6 +422,54 @@ export default function MinimalistVoiceAgent() {
       <div
         className={`relative flex flex-col border-x border-[#e0e0dc] bg-white transition-all ${showAudit ? "flex-1" : "flex-1"}`}
       >
+        {/* Profile Selector & End Chat Header */}
+        <div className="flex items-center justify-between border-b border-[#e0e0dc] px-8 py-3 bg-[#fafaf8]">
+          <div className="flex items-center gap-2 text-xs font-semibold text-[#444]">
+            <User className="h-4 w-4 text-blue-600" />
+            <span>Active Test Profile:</span>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <select
+              value={selectedAccountId}
+              onChange={(e) => {
+                const newId = e.target.value;
+                setSelectedAccountId(newId);
+                const cust = customers.find((c) => c.account_id === newId);
+                const name = cust ? `${cust.first_name} ${cust.last_name}` : newId.slice(0, 8);
+                resetChat(name);
+              }}
+              className="rounded-md border border-[#ccc] bg-white px-3 py-1.5 text-xs font-medium text-[#1a1a1a] shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+            >
+              {customers.length > 0 ? (
+                customers.map((c) => (
+                  <option key={c.account_id} value={c.account_id}>
+                    {c.first_name} {c.last_name} — Score: {c.credit_score} | Limit: ${Number(c.credit_limit).toLocaleString()} ({c.account_status})
+                  </option>
+                ))
+              ) : (
+                <>
+                  <option value="a6666666-0000-0000-0000-000000000006">Alex Taylor (Score: 720 — Limit $1,400 / Spend $3,000)</option>
+                  <option value="a2222222-0000-0000-0000-000000000002">Sarah Chen (Score: 620 — Fee Waiver Eligible)</option>
+                  <option value="a1111111-0000-0000-0000-000000000001">James Wilson (Score: 750 — Waiver Ineligible)</option>
+                  <option value="a3333333-0000-0000-0000-000000000003">Marcus Johnson (Score: 810 — Fully Eligible)</option>
+                  <option value="a4444444-0000-0000-0000-000000000004">Emily Rodriguez (Score: 580 — New Account)</option>
+                  <option value="a5555555-0000-0000-0000-000000000005">David Kim (Score: 490 — Suspended Account)</option>
+                </>
+              )}
+            </select>
+
+            <button
+              onClick={() => resetChat()}
+              className="flex items-center gap-1.5 rounded-md border border-red-200 bg-red-50 hover:bg-red-100 px-3 py-1.5 text-xs font-semibold text-red-600 transition-colors shadow-sm cursor-pointer"
+              title="End current session and start a fresh chat"
+            >
+              <Square className="h-3 w-3 fill-red-600" />
+              End Chat
+            </button>
+          </div>
+        </div>
+
         <div className="flex-1 space-y-8 overflow-y-auto px-10 py-10 pb-36">
           {messages.map((m) => (
             <div key={m.id} className="duration-500 animate-in fade-in slide-in-from-bottom-2">

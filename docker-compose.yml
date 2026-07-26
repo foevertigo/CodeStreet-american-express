@@ -107,47 +107,15 @@ services:
       kafka:
         condition: service_healthy
     entrypoint: ["/bin/bash", "-c"]
-    command: |
-      "
-      echo 'Waiting for Kafka to be ready...'
-      kafka-topics --bootstrap-server kafka:29092 --list
-
-      echo 'Creating agent-actions topic...'
-      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
-        --topic agent-actions \
-        --partitions 3 \
-        --replication-factor 1 \
-        --config retention.ms=604800000
-
-      echo 'Creating compliance-decisions topic...'
-      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
-        --topic compliance-decisions \
-        --partitions 3 \
-        --replication-factor 1 \
-        --config retention.ms=604800000
-
-      echo 'Creating card-events topic...'
-      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
-        --topic card-events \
-        --partitions 2 \
-        --replication-factor 1 \
-        --config retention.ms=604800000
-
-      echo 'Creating system-errors topic...'
-      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
-        --topic system-errors \
-        --partitions 2 \
-        --replication-factor 1 \
-        --config retention.ms=604800000
-
-      echo 'Creating escalations topic...'
-      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
-        --topic escalations \
-        --partitions 1 \
-        --replication-factor 1 \
-        --config retention.ms=604800000
-
-      echo 'Topics created successfully:'
+    command: >
+      bash -c "
+      echo 'Waiting for Kafka to be ready...' &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic agent-actions --partitions 3 --replication-factor 1 --config retention.ms=604800000 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic compliance-decisions --partitions 3 --replication-factor 1 --config retention.ms=604800000 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic card-events --partitions 2 --replication-factor 1 --config retention.ms=604800000 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic system-errors --partitions 2 --replication-factor 1 --config retention.ms=604800000 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic escalations --partitions 1 --replication-factor 1 --config retention.ms=604800000 &&
+      echo 'Topics created successfully:' &&
       kafka-topics --bootstrap-server kafka:29092 --list
       "
 

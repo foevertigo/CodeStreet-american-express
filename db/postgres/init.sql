@@ -251,6 +251,12 @@ INSERT INTO customers (
     'David', 'Kim', 'david.kim@demo.com', '+12025550005',
     '1990-09-14', '7890', '10 Downing Street', 'New York', 'NY', '10001',
     'suspended', 490, 55000.00, 2000.00, 1900.00, '2020-08-10'
+),
+(
+    'a6666666-0000-0000-0000-000000000006',
+    'Alex', 'Taylor', 'alex.taylor@demo.com', '+12025550006',
+    '1994-06-18', '6789', '100 Financial Plaza', 'San Francisco', 'CA', '94104',
+    'active', 720, 65000.00, 1400.00, 850.00, '2024-03-01'
 );
 
 -- Insert some fee waiver history for James (already used his waiver this year)
