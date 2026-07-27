@@ -15,7 +15,9 @@ from ai_backend.agent.state import AgentState
 from ai_backend.agent.prompts import SYSTEM_PROMPT
 from ai_backend.agent.tools import (
     tool_waive_fee,
-    tool_increase_limit,
+    tool_check_limit_eligibility,
+    tool_confirm_limit_change,
+    tool_decrease_limit,
     tool_replace_card,
     tool_set_travel_notification,
     tool_escalate_to_human
@@ -27,7 +29,9 @@ logger = logging.getLogger(__name__)
 # Register all deterministic tools
 TOOLS = [
     tool_waive_fee,
-    tool_increase_limit,
+    tool_check_limit_eligibility,
+    tool_confirm_limit_change,
+    tool_decrease_limit,
     tool_replace_card,
     tool_set_travel_notification,
     tool_escalate_to_human
@@ -328,10 +332,16 @@ class ConversationManager:
         assistant_reply = ""
         tools_executed = []
 
-        for msg in final_messages:
+        # Find assistant reply from final message
+        for msg in reversed(final_messages):
             if isinstance(msg, AIMessage) and msg.content:
                 assistant_reply = msg.content
-            elif isinstance(msg, ToolMessage):
+                break
+
+        # Only extract tools executed during THIS turn
+        new_messages = final_messages[len(messages):]
+        for msg in new_messages:
+            if isinstance(msg, ToolMessage):
                 tools_executed.append({
                     "name": getattr(msg, "name", "tool"),
                     "content": msg.content

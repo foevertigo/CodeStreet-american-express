@@ -71,12 +71,15 @@ def push_escalation_to_sse(data: Dict[str, Any]):
             pass
 
 
-# Helper for synchronous tool call to trigger async broadcast + SSE push
+# Store a reference to the main event loop at startup
+_main_loop: asyncio.AbstractEventLoop | None = None
+
 def sync_supervisor_broadcaster(data: Dict[str, Any]):
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        asyncio.create_task(supervisor_manager.broadcast(data))
+    """Push escalation from any thread (including ThreadPoolExecutor) safely."""
     push_escalation_to_sse(data)
+    loop = _main_loop
+    if loop and loop.is_running():
+        asyncio.run_coroutine_threadsafe(supervisor_manager.broadcast(data), loop)
 
 
 set_supervisor_broadcaster(sync_supervisor_broadcaster)
@@ -84,6 +87,8 @@ set_supervisor_broadcaster(sync_supervisor_broadcaster)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
     logger.info("Starting AmEx End-to-End AI Servicing Backend...")
     yield
     logger.info("Shutting down backend services...")

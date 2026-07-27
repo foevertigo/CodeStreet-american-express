@@ -3,7 +3,7 @@ tools.py — Deterministic Policy Engine & Banking Microservices Tools (Optimize
 """
 
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
 from langchain_core.tools import tool
 
 from audit_service.postgres_client import PostgresClient
@@ -53,11 +53,12 @@ def safe_publish_event(event):
 
 
 @tool
-def tool_waive_fee(account_id: str, fee_type: str = "late_fee", amount_requested: float = 35.0, session_id: str = "session-default") -> str:
+def tool_waive_fee(account_id: str, fee_type: str = "late_fee", amount_requested: Union[float, str] = 35.0, session_id: str = "session-default") -> str:
     """
     Evaluates fee waiver eligibility against compliance rules and updates database.
     Rule: Denied if customer had an approved fee waiver in the last 12 months.
     """
+    amount_requested = float(amount_requested)
     logger.info(f"Executing tool_waive_fee: account={account_id}, fee_type={fee_type}, amount={amount_requested}")
     customer = get_customer_profile(account_id)
     if not customer:
@@ -171,16 +172,59 @@ def tool_waive_fee(account_id: str, fee_type: str = "late_fee", amount_requested
 
 
 @tool
-def tool_increase_limit(account_id: str, requested_amount: float, income: float, session_id: str = "session-default") -> str:
+def tool_check_limit_eligibility(account_id: str, requested_amount: Union[float, str], income: Union[float, str]) -> str:
     """
-    Evaluates credit limit increase request against risk models and updates customer account.
-    Rule: Credit score must be > 700 and requested limit <= (income * 0.20).
+    DRY-RUN eligibility check for a credit limit change request.
+    Evaluates the customer against policy rules WITHOUT making any database changes.
+    Returns a human-readable criteria report so the agent can inform the customer
+    and ask for confirmation before committing any change.
+    Rule: Credit score must be > 700 AND requested_limit <= 20% of annual income.
     """
-    logger.info(f"Executing tool_increase_limit: account={account_id}, limit={requested_amount}, income={income}")
+    requested_amount = float(requested_amount)
+    income = float(income)
+    logger.info(f"Executing tool_check_limit_eligibility (DRY RUN): account={account_id}, requested={requested_amount}, income={income}")
     customer = get_customer_profile(account_id)
     if not customer:
         return f"Error: Customer account_id {account_id} not found."
-    
+
+    current_limit = float(customer.get("credit_limit", 0.0))
+    credit_score = int(customer.get("credit_score", 0))
+    max_allowed = income * 0.20
+
+    score_ok = credit_score > 700
+    limit_ok = requested_amount <= max_allowed
+    eligible = score_ok and limit_ok
+
+    criteria_lines = [
+        f"  {'\u2705' if score_ok else '\u274c'} Credit Score: {credit_score} (required > 700) — {'PASS' if score_ok else 'FAIL'}",
+        f"  {'\u2705' if limit_ok else '\u274c'} Requested limit ${requested_amount:,.2f} vs. 20% income cap ${max_allowed:,.2f} — {'PASS' if limit_ok else 'FAIL'}",
+    ]
+
+    result_lines = [
+        f"ELIGIBILITY REPORT (no changes made yet):",
+        f"  Current limit: ${current_limit:,.2f}",
+        f"  Requested limit: ${requested_amount:,.2f}",
+        *criteria_lines,
+        f"  Overall: {'ELIGIBLE' if eligible else 'NOT ELIGIBLE'}",
+    ]
+
+    return "\n".join(result_lines)
+
+
+@tool
+def tool_confirm_limit_change(account_id: str, requested_amount: Union[float, str], income: Union[float, str], session_id: str = "session-default") -> str:
+    """
+    COMMITS a previously evaluated credit limit INCREASE after the customer has explicitly confirmed.
+    Only call this tool after tool_check_limit_eligibility has been run AND the customer has said YES.
+    Rule: Credit score must be > 700 AND requested_limit <= 20% of annual income.
+    """
+    requested_amount = float(requested_amount)
+    income = float(income)
+    logger.info(f"Executing tool_confirm_limit_change: account={account_id}, limit={requested_amount}, income={income}")
+    customer = get_customer_profile(account_id)
+    if not customer:
+        return f"Error: Customer account_id {account_id} not found."
+
     current_limit = float(customer.get("credit_limit", 0.0))
     credit_score = int(customer.get("credit_score", 0))
     max_allowed = income * 0.20
@@ -189,7 +233,7 @@ def tool_increase_limit(account_id: str, requested_amount: float, income: float,
     limit_ok = requested_amount <= max_allowed
 
     if score_ok and limit_ok:
-        # APPROVE
+        # APPROVE & COMMIT
         if is_db_available():
             try:
                 client = PostgresClient()
@@ -231,17 +275,17 @@ def tool_increase_limit(account_id: str, requested_amount: float, income: float,
         safe_publish_event(action_event)
 
         return (
-            f"CREDIT LIMIT INCREASE APPROVED! The credit limit for {customer.get('first_name')} {customer.get('last_name')} "
-            f"has been increased from ${current_limit:,.2f} to ${requested_amount:,.2f}. Effective immediately."
+            f"CREDIT LIMIT CHANGE COMMITTED: The credit limit for "
+            f"{customer.get('first_name')} {customer.get('last_name')} "
+            f"has been updated from ${current_limit:,.2f} to ${requested_amount:,.2f}. Effective immediately."
         )
     else:
-        # DENIED
+        # Policy violation — should not normally reach here if Phase 1 was done correctly
         reasons = []
         if not score_ok:
-            reasons.append(f"Credit score ({credit_score}) is below the required 701 minimum threshold.")
+            reasons.append(f"Credit score ({credit_score}) is below the required 701 minimum.")
         if not limit_ok:
-            reasons.append(f"Requested limit (${requested_amount:,.2f}) exceeds maximum allowed cap of 20% of income (${max_allowed:,.2f}).")
-        
+            reasons.append(f"Requested limit (${requested_amount:,.2f}) exceeds 20% of annual income cap (${max_allowed:,.2f}).")
         denial_reason = " ".join(reasons)
 
         if is_db_available():
@@ -288,9 +332,74 @@ def tool_increase_limit(account_id: str, requested_amount: float, income: float,
         safe_publish_event(action_event)
 
         return (
-            f"CREDIT LIMIT INCREASE DENIED: {denial_reason} "
+            f"CREDIT LIMIT CHANGE DENIED: {denial_reason} "
             f"Current credit limit remains ${current_limit:,.2f}."
         )
+
+
+@tool
+def tool_decrease_limit(account_id: str, requested_amount: Union[float, str], income: Union[float, str], session_id: str = "session-default") -> str:
+    """
+    Reduces the customer's credit limit with a mandatory floor: the new limit cannot
+    fall below the customer's monthly salary (annual_income / 12).
+    Call this only after the customer has explicitly confirmed the decrease.
+    """
+    requested_amount = float(requested_amount)
+    income = float(income)
+    logger.info(f"Executing tool_decrease_limit: account={account_id}, requested={requested_amount}, income={income}")
+    customer = get_customer_profile(account_id)
+    if not customer:
+        return f"Error: Customer account_id {account_id} not found."
+
+    current_limit = float(customer.get("credit_limit", 0.0))
+    monthly_salary = income / 12.0
+
+    if requested_amount < monthly_salary:
+        return (
+            f"CREDIT LIMIT DECREASE DENIED: The requested limit of ${requested_amount:,.2f} is below "
+            f"the minimum allowed limit of ${monthly_salary:,.2f} (your monthly salary). "
+            f"Your current limit of ${current_limit:,.2f} has not been changed."
+        )
+
+    if requested_amount >= current_limit:
+        return (
+            f"CREDIT LIMIT DECREASE INVALID: The requested amount ${requested_amount:,.2f} is not "
+            f"lower than your current limit of ${current_limit:,.2f}. No changes were made."
+        )
+
+    # COMMIT the decrease
+    if is_db_available():
+        try:
+            client = PostgresClient()
+            client.record_credit_limit_change(
+                account_id=account_id,
+                previous_limit=current_limit,
+                requested_limit=requested_amount,
+                approved_limit=requested_amount,
+                decision="approved",
+                session_id=session_id,
+                income_reported=income
+            )
+        except Exception as e:
+            logger.warning(f"DB record limit decrease error: {e}")
+
+    action_event = CreditLimitChangeEvent(
+        session_id=session_id,
+        account_id=account_id,
+        previous_limit=current_limit,
+        requested_limit=requested_amount,
+        approved_limit=requested_amount,
+        decision=EventDecision.APPROVED,
+        income_reported=income,
+        agent_reasoning=f"Decrease approved: ${requested_amount:,.2f} is above monthly salary floor of ${monthly_salary:,.2f}."
+    )
+    safe_publish_event(action_event)
+
+    return (
+        f"CREDIT LIMIT DECREASE COMMITTED: The credit limit for "
+        f"{customer.get('first_name')} {customer.get('last_name')} "
+        f"has been reduced from ${current_limit:,.2f} to ${requested_amount:,.2f}. Effective immediately."
+    )
 
 
 @tool

@@ -90,13 +90,19 @@ export default function MinimalistVoiceAgent() {
 
   useEffect(() => {
     fetch("http://localhost:8000/api/customers")
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then((data) => {
         if (data.customers && data.customers.length > 0) {
           setCustomers(data.customers);
         }
       })
-      .catch((err) => console.error("Failed to load customer profiles:", err));
+      .catch((err) => {
+        // Backend may still be starting — swallow silently, fallback options are in the JSX
+        console.warn("Customer profiles unavailable (backend may be loading):", err.message);
+      });
   }, []);
 
   const resetChat = (newProfileName?: string) => {
@@ -170,9 +176,6 @@ export default function MinimalistVoiceAgent() {
     positiveSpeechThreshold: 0.6,
     negativeSpeechThreshold: 0.35,
     onSpeechStart: () => {
-
-
-
       if (!isProcessingRef.current && !isAiSpeaking) {
         setIsUserSpeaking(true);
         addAuditLog("[MIC] Voice activity detected — speech captured");
@@ -338,10 +341,13 @@ export default function MinimalistVoiceAgent() {
 
   // Automatically pause microphone while AI is speaking
   useEffect(() => {
-    if (isAiSpeaking && vad.listening) {
+    // Guard: do not call VAD methods if the stream/audio-context isn't ready yet
+    const vadReady = !vad.loading && !vad.errored;
+
+    if (isAiSpeaking && vadReady && vad.listening) {
       // AI is talking — stop listening to avoid feedback loops
       vad.pause();
-    } else if (!isAiSpeaking && hasStarted && !vad.listening && !vad.loading && !vad.errored) {
+    } else if (!isAiSpeaking && hasStarted && vadReady && !vad.listening) {
       // AI finished talking — resume listening
       vad.start();
     }
